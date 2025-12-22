@@ -1,0 +1,56 @@
+# Build directories
+ns-3-dev/build/
+ns-3-dev/cmake-cache/
+ns-3-dev/.lock-*
+
+# Compiled files
+*.o
+*.a
+*.so
+*.dylib
+*.la
+*.lo
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Log files
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# ns-3 specific
+ns-3-dev/default
+ns-3-dev/.waf-*
+ns-3-dev/.lock-waf_*
+
+# Large data files (if any)
+*.pcap
+*.tr
+*.dat
+
+# Virtual environments
+venv/
+env/
+ns3env/
+myenv/
+ns-3-dev/
