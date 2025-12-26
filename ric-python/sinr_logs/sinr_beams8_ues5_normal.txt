@@ -1,1 +1,0 @@
-PBIG (Bizim Önerimiz)	Düşük-Orta (Popülasyon tabanlı başlangıç + açgözlü yineleme) (Eğitim verisi gerektirmez, %85 daha hızlı)	Mükemmel (Max-SINR'ye yakın sonuçlar) (Çok kullanıcılı senaryolarda yüksek throughput) (Adaptif kanal koşullarına uyum)	Dağdeviren vd., (2017), Bu Tez (2025)

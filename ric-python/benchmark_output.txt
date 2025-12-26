@@ -1,0 +1,59 @@
+======================================================================
+8 BEAM BENCHMARK - 10 to 100 UE (Gerçek 5G-LENA)
+======================================================================
+LENA verisi: lena_scalability_8beam
+Base LENA verisi: 24 beams, 8 UEs
+SINR range: -112.3 to 17.9 dB
+
+10 UE (24 beam x 8 UE):
+  Max-SINR  : Throughput=    1414 Mbps, Jain=0.5408
+  GA        : Throughput=    1551 Mbps, Jain=0.5640
+  HGA       : Throughput=    1551 Mbps, Jain=0.5640
+  PBIG      : Throughput=    1551 Mbps, Jain=0.5640
+
+20 UE (24 beam x 15 UE):
+  Max-SINR  : Throughput=    6466 Mbps, Jain=0.5378
+  GA        : Throughput=    6734 Mbps, Jain=0.5234
+  HGA       : Throughput=    6970 Mbps, Jain=0.5604
+  PBIG      : Throughput=    6851 Mbps, Jain=0.5573
+
+30 UE (24 beam x 22 UE):
+  Max-SINR  : Throughput=   13244 Mbps, Jain=0.4626
+  GA        : Throughput=   13919 Mbps, Jain=0.4386
+  HGA       : Throughput=   15048 Mbps, Jain=0.4883
+  PBIG      : Throughput=   14617 Mbps, Jain=0.4754
+
+40 UE (24 beam x 28 UE):
+  Max-SINR  : Throughput=   17931 Mbps, Jain=0.4624
+  GA        : Throughput=   14702 Mbps, Jain=0.3109
+  HGA       : Throughput=   20653 Mbps, Jain=0.5030
+  PBIG      : Throughput=   19830 Mbps, Jain=0.4816
+
+50 UE (24 beam x 34 UE):
+  Max-SINR  : Throughput=   20294 Mbps, Jain=0.4527
+  GA        : Throughput=   19289 Mbps, Jain=0.3949
+  HGA       : Throughput=   23562 Mbps, Jain=0.4755
+  PBIG      : Throughput=   22783 Mbps, Jain=0.4672
+  ATLA: ue60 dizini bulunamadı
+  ATLA: ue70 dizini bulunamadı
+  ATLA: ue80 dizini bulunamadı
+  ATLA: ue90 dizini bulunamadı
+  ATLA: ue100 dizini bulunamadı
+
+✅ Kaydedildi: results_8beam_10to100.csv
+Kaydedildi: plots_8beam_10to100/sumrate_8beam.png
+Kaydedildi: plots_8beam_10to100/jain_8beam.png
+Kaydedildi: plots_8beam_10to100/fitness_8beam.png
+
+================================================================================
+SONUÇ TABLOSU (8 Beam, 10-100 UE, Gerçek 5G-LENA)
+================================================================================
+   UE |           GA |          HGA |         PBIG |     Max-SINR
+-----------------------------------------------------------------
+   10 |       1551 Mbps |       1551 Mbps |       1551 Mbps |       1414 Mbps
+   20 |       6734 Mbps |       6970 Mbps |       6851 Mbps |       6466 Mbps
+   30 |      13919 Mbps |      15048 Mbps |      14617 Mbps |      13244 Mbps
+   40 |      14702 Mbps |      20653 Mbps |      19830 Mbps |      17931 Mbps
+   50 |      19289 Mbps |      23562 Mbps |      22783 Mbps |      20294 Mbps
+
+Tamamlandı!

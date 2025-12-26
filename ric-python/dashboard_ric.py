@@ -561,36 +561,60 @@ def hga_algorithm(sinr_matrix, pop_size=50, generations=100, alpha=0.7):
     
     return max(population, key=evaluate)
 
-def pbig_algorithm(sinr_matrix, max_iter=100, alpha=0.7):
-    """Population-Based Iterated Greedy"""
+def pbig_algorithm(sinr_matrix, max_iter=100, alpha=0.7, d_ratio=0.3):
+    """Population-Based Iterated Greedy with Destruction & Reconstruction"""
     num_beams, num_ues = sinr_matrix.shape
-    prob_matrix = np.ones((num_ues, num_beams)) / num_beams
-    
-    def sample():
-        return np.array([np.random.choice(num_beams, p=prob_matrix[ue]) for ue in range(num_ues)])
+    pop_size = 20
     
     def evaluate(ind):
         rates = compute_rates(sinr_matrix, ind)
         return objective_function(rates, alpha)
     
-    best = sample()
-    best_fitness = evaluate(best)
+    def greedy_assign(ue_id, current_assignment, destroyed_ues):
+        """Greedy reconstruction: assign UE to beam that maximizes objective"""
+        best_beam = 0
+        best_fitness = -float('inf')
+        
+        for beam in range(num_beams):
+            # Try assigning this UE to this beam
+            test_assignment = current_assignment.copy()
+            test_assignment[ue_id] = beam
+            
+            # Calculate fitness if we assign this UE
+            fitness = evaluate(test_assignment)
+            
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_beam = beam
+        
+        return best_beam
+    
+    # Initialize population (random + repaired)
+    population = [np.random.randint(0, num_beams, num_ues) for _ in range(pop_size)]
     
     for iteration in range(max_iter):
-        samples = [sample() for _ in range(20)]
-        scores = [evaluate(s) for s in samples]
-        best_idx = np.argmax(scores)
+        # Select a random solution from population
+        idx = np.random.randint(0, pop_size)
+        S = population[idx].copy()
         
-        if scores[best_idx] > best_fitness:
-            best_fitness = scores[best_idx]
-            best = samples[best_idx]
+        # Destruction Phase: remove d_ratio of users
+        num_destroy = max(1, int(num_ues * d_ratio))
+        destroyed_ues = np.random.choice(num_ues, num_destroy, replace=False)
         
-        for ue in range(num_ues):
-            prob_matrix[ue] *= 0.9
-            prob_matrix[ue, best[ue]] += 0.1
-            prob_matrix[ue] /= prob_matrix[ue].sum()
+        # Mark destroyed UEs as unassigned (-1)
+        for ue in destroyed_ues:
+            S[ue] = -1
+        
+        # Reconstruction Phase: greedy reassignment
+        for ue in destroyed_ues:
+            S[ue] = greedy_assign(ue, S, destroyed_ues)
+        
+        # Accept if better
+        if evaluate(S) > evaluate(population[idx]):
+            population[idx] = S
     
-    return best
+    # Return best solution from population
+    return max(population, key=evaluate)
 
 # ============================================================
 # SIDEBAR CONTROLS
@@ -650,11 +674,11 @@ rerun_lena = st.sidebar.button("🔄 LENA Sim.", use_container_width=True, type=
 def check_existing_lena_data(beam_count, ue_counts):
     """Hangi UE sayıları için veri mevcut kontrol et"""
     if beam_count == 4:
-        data_dir = LENA_OUTPUT_DIR / 'lena_4beam_10to100'
+        data_dir = LENA_OUTPUT_DIR / 'lena_4beam_20251226_024646'
     elif beam_count == 16:
         data_dir = LENA_OUTPUT_DIR / 'lena_16beam_10to100'
     else:
-        data_dir = LENA_OUTPUT_DIR / 'lena_8beam_10to100'
+        data_dir = LENA_OUTPUT_DIR / 'lena_8beam_20251226_050004'
     
     existing = []
     missing = []
@@ -679,7 +703,7 @@ with st.sidebar.form(key="simulation_form"):
     
     ric_col1, ric_col2 = st.columns(2)
     with ric_col1:
-        max_ues_per_beam = st.checkbox("Kapasite Limit")
+        max_ues_per_beam = st.checkbox("Kapasite Limit", value=True)  # Default seçili
     with ric_col2:
         if max_ues_per_beam:
             capacity = st.number_input("Max/Beam", 2, 10, 4, label_visibility="visible")
@@ -819,7 +843,7 @@ if run_simulation:
             lena_data_dir = existing_sims[0]['name']  # En yeni
         else:
             # Hiç simülasyon yok
-            lena_data_dir = f'lena_{num_beams}beam_10to100'
+            lena_data_dir = f'lena_{num_beams}beam_20251226_050004' if num_beams == 8 else f'lena_{num_beams}beam_10to100'
     
     # Add initial log
     st.session_state['logs'].append(f"[{time.strftime('%H:%M:%S')}] 🚀 Simülasyon başlatılıyor...")
@@ -1238,60 +1262,56 @@ if 'sinr_matrix' in st.session_state:
                 
                 # Check if we need to recalculate for different UE count
                 if selected_table_ue != num_ues:
-                    # Get LENA data directory from session state
-                    lena_data_dir = st.session_state.get('lena_data_dir', f'lena_{num_beams}beam_10to100')
+                    # Load from CSV instead of recalculating
+                    benchmark_file = f"results_{num_beams}beam_10to100.csv"
                     
-                    # Load LENA SINR data for selected UE count
-                    st.info(f"⟳ {selected_table_ue} UE için LENA verisi yüklenip hesaplanıyor...")
-                    
-                    # Load SINR matrix from LENA data
-                    temp_sinr_matrix, temp_actual_ues = load_lena_sinr(lena_data_dir, selected_table_ue)
-                    
-                    if temp_sinr_matrix is None:
-                        st.error(f"❌ {selected_table_ue} UE için LENA verisi bulunamadı! Klasör: `{lena_data_dir}/ue{selected_table_ue}/`")
-                    else:
-                        # Recalculate for each algorithm
-                        results_data = []
-                        best_score = -float('inf')
-                        best_score_alg = None
-                        best_fair = -float('inf')
-                        best_fair_alg = None
+                    if os.path.exists(benchmark_file):
+
+                        df_bench = pd.read_csv(benchmark_file)
+                        df_selected = df_bench[df_bench['num_ues'] == selected_table_ue]
                         
-                        for alg_name in algs_to_run:
-                            start_time = time.time()
+                        if len(df_selected) == 0:
+                            st.error(f"❌ {selected_table_ue} UE için CSV'de veri bulunamadı!")
+                            results_data = []
+                        else:
+                            # Build results from CSV with fixed order
+                            algorithm_order = ['HGA', 'PBIG', 'GA', 'Max-SINR']
+                            results_data = []
+                            best_score = -float('inf')
+                            best_score_alg = None
+                            best_fair = -float('inf')
+                            best_fair_alg = None
                             
-                            if alg_name == 'GA':
-                                assignment = ga_algorithm(temp_sinr_matrix, alpha=alpha)
-                            elif alg_name == 'HGA':
-                                assignment = hga_algorithm(temp_sinr_matrix, alpha=alpha)
-                            elif alg_name == 'PBIG':
-                                assignment = pbig_algorithm(temp_sinr_matrix, alpha=alpha)
-                            else:  # Max-SINR
-                                assignment = max_sinr_assignment(temp_sinr_matrix)
-                            
-                            runtime = time.time() - start_time
-                            rates = compute_rates(temp_sinr_matrix, assignment, interference_factor)
-                            
-                            sum_rate = np.sum(rates)
-                            jain = jain_fairness(rates)
-                            fitness = objective_function(rates, alpha)
-                            throughput_mbps = sum_rate * 100 * 0.8
-                            
-                            if fitness > best_score:
-                                best_score = fitness
-                                best_score_alg = alg_name
-                            if jain > best_fair:
-                                best_fair = jain
-                                best_fair_alg = alg_name
-                            
-                            results_data.append({
-                                'alg': alg_name,
-                                'sum_rate': sum_rate,
-                                'throughput': throughput_mbps,
-                                'jain': jain,
-                                'fitness': fitness,
-                                'runtime': runtime * 1000
-                            })
+                            # Process in fixed order
+                            for alg_name in algorithm_order:
+                                row_data = df_selected[df_selected['algorithm'] == alg_name]
+                                if len(row_data) > 0:
+                                    row = row_data.iloc[0]
+                                    sum_rate = row['sum_rate']
+                                    throughput = row['throughput']
+                                    jain = row['fairness']
+                                    
+                                    # Calculate fitness (same formula as algorithms)
+                                    fitness = alpha * sum_rate + (1 - alpha) * jain
+                                    
+                                    if fitness > best_score:
+                                        best_score = fitness
+                                        best_score_alg = alg_name
+                                    if jain > best_fair:
+                                        best_fair = jain
+                                        best_fair_alg = alg_name
+                                    
+                                    results_data.append({
+                                        'alg': alg_name,
+                                        'sum_rate': sum_rate,
+                                        'throughput': throughput,
+                                        'jain': jain,
+                                        'fitness': fitness,
+                                        'runtime': 0  # CSV doesn't have runtime
+                                    })
+                    else:
+                        st.error(f"❌ Benchmark dosyası bulunamadı: {benchmark_file}")
+                        results_data = []
                 
                 # Update num_ues for table display
                 display_num_ues = selected_table_ue
@@ -1369,18 +1389,39 @@ if 'sinr_matrix' in st.session_state:
     # ========== UE SWEEP COMPARISON CHARTS (10-100 UE) ==========
     st.divider()
     
-    # Determine which benchmark file to use based on beam count
+    # Capacity selection dropdown
+    capacity_scenario = st.selectbox(
+        "📊 Kapasite Senaryosu",
+        options=["Sınırsız", "Max 4 UE/Beam"],
+        index=0,
+        key="capacity_scenario_selector"
+    )
+    
+    # Determine which benchmark file to use based on beam count AND capacity
     if num_beams == 4:
-        benchmark_file = "results_4beam_10to100.csv"
+        if capacity_scenario == "Max 4 UE/Beam":
+            benchmark_file = "results_4beam_10to100_cap4.csv"
+        else:
+            benchmark_file = "results_4beam_10to100.csv"
         chart_beam_label = "4 Hüzme"
     elif num_beams == 16:
-        benchmark_file = "results_16beam_10to100.csv"
+        if capacity_scenario == "Max 4 UE/Beam":
+            benchmark_file = "results_16beam_10to100_cap4.csv"
+        else:
+            benchmark_file = "results_16beam_10to100.csv"
         chart_beam_label = "16 Hüzme"
     else:
-        benchmark_file = "results_8beam_10to100.csv"
+        if capacity_scenario == "Max 4 UE/Beam":
+            benchmark_file = "results_8beam_10to100_cap4.csv"
+        else:
+            benchmark_file = "results_8beam_10to100.csv"
         chart_beam_label = "8 Hüzme"
     
-    st.subheader(f"📈 Algoritma Performans Karşılaştırması ({chart_beam_label}, 10-100 UE)")
+    # Update title based on capacity
+    if capacity_scenario == "Max 4 UE/Beam":
+        st.subheader(f"📈 Algoritma Performans Karşılaştırması ({chart_beam_label}, 10-100 UE, Max 4 UE/Beam)")
+    else:
+        st.subheader(f"📈 Algoritma Performans Karşılaştırması ({chart_beam_label}, 10-100 UE)")
     
     # Load benchmark results
     chart_beam_display = num_beams  # Will be updated if fallback
@@ -1448,7 +1489,7 @@ if 'sinr_matrix' in st.session_state:
                 color = algo_colors.get(alg, '#888888')
                 marker = algo_markers.get(alg, 'o')
                 linestyle = '--' if alg == 'Max-SINR' else '-'
-                label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                label = 'Max-SINR' if alg == 'Max-SINR' else alg
                 ax1.plot(alg_data['num_ues'], alg_data['fairness'], 
                         marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
             ax1.set_xlabel('Kullanıcı Sayısı', fontweight='bold')
@@ -1471,7 +1512,7 @@ if 'sinr_matrix' in st.session_state:
                 color = algo_colors.get(alg, '#888888')
                 marker = algo_markers.get(alg, 'o')
                 linestyle = '--' if alg == 'Max-SINR' else '-'
-                label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                label = 'Max-SINR' if alg == 'Max-SINR' else alg
                 ax2.plot(alg_data['num_ues'], alg_data['throughput'], 
                         marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
             ax2.set_xlabel('Kullanıcı Sayısı', fontweight='bold')
@@ -1497,7 +1538,7 @@ if 'sinr_matrix' in st.session_state:
                 max_tp = df_bench['throughput'].max()
                 norm_tp = alg_data['throughput'] / max_tp
                 fitness = alpha_val * norm_tp + (1 - alpha_val) * alg_data['fairness']
-                label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                label = 'Max-SINR' if alg == 'Max-SINR' else alg
                 ax3.plot(alg_data['num_ues'], fitness, 
                         marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
             ax3.set_xlabel('Kullanıcı Sayısı', fontweight='bold')
@@ -1533,7 +1574,7 @@ if 'sinr_matrix' in st.session_state:
                     color = algo_colors.get(alg, '#888888')
                     marker = algo_markers.get(alg, 'o')
                     linestyle = '--' if alg == 'Max-SINR' else '-'
-                    label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                    label = 'Max-SINR' if alg == 'Max-SINR' else alg
                     ax1.plot(alg_data['num_ues'], alg_data['fairness'], 
                             marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
                 ax1.set_xlabel('Kullanıcı Sayısı', fontweight='bold')
@@ -1555,7 +1596,7 @@ if 'sinr_matrix' in st.session_state:
                     color = algo_colors.get(alg, '#888888')
                     marker = algo_markers.get(alg, 'o')
                     linestyle = '--' if alg == 'Max-SINR' else '-'
-                    label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                    label = 'Max-SINR' if alg == 'Max-SINR' else alg
                     ax2.plot(alg_data['num_ues'], alg_data['throughput'], 
                             marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
                 ax2.set_xlabel('Kullanıcı Sayısı', fontweight='bold')
@@ -1580,7 +1621,7 @@ if 'sinr_matrix' in st.session_state:
                     max_tp = df_bench['throughput'].max()
                     norm_tp = alg_data['throughput'] / max_tp
                     fitness = alpha_val * norm_tp + (1 - alpha_val) * alg_data['fairness']
-                    label = 'Max-SINR (Üst Sınır)' if alg == 'Max-SINR' else alg
+                    label = 'Max-SINR' if alg == 'Max-SINR' else alg
                     ax3.plot(alg_data['num_ues'], fitness, 
                             marker=marker, label=label, color=color, linewidth=2.5, markersize=8, linestyle=linestyle)
                 ax3.set_xlabel('Kullanıcı Sayısı', fontweight='bold')

@@ -14,15 +14,35 @@ def load_lena_sinr_base(sinr_dir):
     """Load base SINR data from lena_sinr_8beam directory"""
     all_sinr = []
     for gnb_id in range(3):
-        filepath = os.path.join(sinr_dir, f'sinr_gnb{gnb_id}_300ms.json')
-        if os.path.exists(filepath):
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-            sinr = np.array(data['sinr_matrix_dB'])
-            all_sinr.append(sinr)
+        # Try 200ms first (preferred), then 300ms, then 400ms
+        for time_ms in ['200ms', '300ms', '400ms']:
+            filepath = os.path.join(sinr_dir, f'sinr_gnb{gnb_id}_{time_ms}.json')
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    data = json.load(f)
+                sinr = np.array(data['sinr_matrix_dB'])
+                all_sinr.append(sinr)
+                break
+    
     if not all_sinr:
         return None
-    combined = np.hstack(all_sinr)
+    
+    # Pad matrices to have same number of UEs, then stack vertically
+    # Find max UE count across all gNBs
+    max_ues = max(m.shape[1] for m in all_sinr)
+    
+    padded_sinr = []
+    for sinr in all_sinr:
+        if sinr.shape[1] < max_ues:
+            # Pad with very low SINR (-100 dB) for non-existent UEs
+            padding = np.full((sinr.shape[0], max_ues - sinr.shape[1]), -100.0)
+            sinr_padded = np.hstack([sinr, padding])
+        else:
+            sinr_padded = sinr
+        padded_sinr.append(sinr_padded)
+    
+    # Stack vertically: 3 gNBs × 8 beams = 24 total beams
+    combined = np.vstack(padded_sinr)
     return combined
 
 def create_sinr_for_ues(base_sinr, num_beams, num_ues, seed=42):
@@ -139,111 +159,95 @@ def ga_algorithm(sinr_matrix, pop_size=50, generations=100, alpha=0.7):
     
     return max(population, key=evaluate)
 
-def pbig_algorithm(sinr_matrix, max_iter=100, alpha=0.7):
-    """Population-Based Iterated Greedy with Load-Aware Reconstruction"""
+def pbig_algorithm(sinr_matrix, max_iter=100, alpha=0.7, d_ratio=0.3):
+    """Population-Based Iterated Greedy with Destruction & Reconstruction"""
     num_beams, num_ues = sinr_matrix.shape
+    pop_size = 20
     
     def evaluate(ind):
         rates = compute_rates(sinr_matrix, ind)
         return objective_function(rates, alpha)
     
-    def load_aware_greedy():
-        """Load-aware greedy construction"""
-        assignment = np.full(num_ues, -1, dtype=int)
-        beam_loads = {b: 0 for b in range(num_beams)}
+    def greedy_assign(ue_id, current_assignment, destroyed_ues):
+        """Greedy reconstruction: assign UE to beam that maximizes objective"""
+        best_beam = 0
+        best_fitness = -float('inf')
         
-        # Sort UEs by max SINR
-        ue_max_sinr = [(ue, np.max(sinr_matrix[:, ue])) for ue in range(num_ues)]
-        ue_max_sinr.sort(key=lambda x: x[1], reverse=True)
+        for beam in range(num_beams):
+            # Try assigning this UE to this beam
+            test_assignment = current_assignment.copy()
+            test_assignment[ue_id] = beam
+            
+            # Calculate fitness if we assign this UE
+            fitness = evaluate(test_assignment)
+            
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_beam = beam
         
-        for ue, _ in ue_max_sinr:
-            beam_sinrs = [(b, sinr_matrix[b, ue]) for b in range(num_beams)]
-            beam_sinrs.sort(key=lambda x: x[1], reverse=True)
-            top_beams = beam_sinrs[:min(3, num_beams)]
-            
-            best_beam = top_beams[0][0]
-            best_sinr = top_beams[0][1]
-            
-            for beam, sinr in top_beams[1:]:
-                if best_sinr - sinr < 5.0 and beam_loads[beam] < beam_loads[best_beam]:
-                    best_beam = beam
-                    best_sinr = sinr
-            
-            assignment[ue] = best_beam
-            beam_loads[best_beam] += 1
-        
-        return assignment
+        return best_beam
     
-    def destruct_reconstruct(ind, d_ratio=0.3):
-        """Destruction and load-aware reconstruction"""
-        new_ind = ind.copy()
-        num_destroy = max(1, int(num_ues * d_ratio))
-        destroy_indices = np.random.choice(num_ues, num_destroy, replace=False)
-        
-        beam_loads = {b: 0 for b in range(num_beams)}
-        for ue, beam in enumerate(new_ind):
-            if ue not in destroy_indices:
-                beam_loads[beam] += 1
-        
-        for ue in destroy_indices:
-            beam_sinrs = [(b, sinr_matrix[b, ue]) for b in range(num_beams)]
-            beam_sinrs.sort(key=lambda x: x[1], reverse=True)
-            
-            best_beam = beam_sinrs[0][0]
-            best_sinr = beam_sinrs[0][1]
-            
-            for beam, sinr in beam_sinrs[1:3]:
-                if best_sinr - sinr < 5.0 and beam_loads[beam] < beam_loads[best_beam]:
-                    best_beam = beam
-            
-            new_ind[ue] = best_beam
-            beam_loads[best_beam] += 1
-        
-        return new_ind
-    
-    # Initialize population
-    pop_size = 30
-    population = [load_aware_greedy() for _ in range(pop_size // 2)]
-    population += [np.random.randint(0, num_beams, num_ues) for _ in range(pop_size - len(population))]
-    
-    best = max(population, key=evaluate)
-    best_fitness = evaluate(best)
+    # Initialize population (random + repaired)
+    population = [np.random.randint(0, num_beams, num_ues) for _ in range(pop_size)]
     
     for iteration in range(max_iter):
-        new_population = []
-        for ind in population:
-            new_ind = destruct_reconstruct(ind)
-            if evaluate(new_ind) > evaluate(ind):
-                new_population.append(new_ind)
-            else:
-                new_population.append(ind)
-            
-            # Track best
-            ind_fitness = evaluate(new_population[-1])
-            if ind_fitness > best_fitness:
-                best = new_population[-1].copy()
-                best_fitness = ind_fitness
+        # Select a random solution from population
+        idx = np.random.randint(0, pop_size)
+        S = population[idx].copy()
         
-        population = new_population
+        # Destruction Phase: remove d_ratio of users
+        num_destroy = max(1, int(num_ues * d_ratio))
+        destroyed_ues = np.random.choice(num_ues, num_destroy, replace=False)
+        
+        # Mark destroyed UEs as unassigned (-1)
+        for ue in destroyed_ues:
+            S[ue] = -1
+        
+        # Reconstruction Phase: greedy reassignment
+        for ue in destroyed_ues:
+            S[ue] = greedy_assign(ue, S, destroyed_ues)
+        
+        # Accept if better
+        if evaluate(S) > evaluate(population[idx]):
+            population[idx] = S
     
-    return best
+    # Return best solution from population
+    return max(population, key=evaluate)
 
 def run_benchmark():
     print("="*70)
-    print("8 BEAM BENCHMARK - 10 to 100 UE (Gerçek 5G-LENA + İnterpolasyon)")
+    print("8 BEAM BENCHMARK - 10 to 100 UE (Gerçek 5G-LENA)")
     print("="*70)
     
-    base_sinr = load_lena_sinr_base("lena_sinr_8beam")
+    # Try different LENA directories (prefer the one with all UE counts)
+    lena_dirs = ["lena_8beam_20251226_050004", "lena_8beam_10to100", "lena_scalability_8beam"]
+    base_sinr = None
+    used_dir = None
+    
+    for lena_dir in lena_dirs:
+        # Try first UE directory to get base data
+        test_dir = os.path.join(lena_dir, "ue10")
+        if os.path.exists(test_dir):
+            try:
+                base_sinr = load_lena_sinr_base(test_dir)
+                if base_sinr is not None:
+                    used_dir = lena_dir
+                    print(f"LENA verisi: {lena_dir}")
+                    break
+            except:
+                continue
+    
     if base_sinr is None:
-        print("HATA: lena_sinr_8beam verisi bulunamadı!")
+        print("HATA: Hiçbir LENA 8beam verisi bulunamadı!")
+        print(f"Aranan dizinler: {lena_dirs}")
         return None
     
-    num_beams = 8
+    num_beams = base_sinr.shape[0]  # Should be 24 (3 gNBs × 8 beams)
     print(f"Base LENA verisi: {base_sinr.shape[0]} beams, {base_sinr.shape[1]} UEs")
     print(f"SINR range: {np.min(base_sinr):.1f} to {np.max(base_sinr):.1f} dB")
     
     ue_targets = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]
-    algorithms = ['GA', 'HGA', 'PBIG', 'Max-SINR']
+    algorithms = ['Max-SINR', 'GA', 'HGA', 'PBIG']
     alpha = 0.7
     bw_mhz = 100
     efficiency = 0.8
@@ -259,7 +263,16 @@ def run_benchmark():
     csv_rows = []
     
     for ue_target in ue_targets:
-        sinr_matrix = create_sinr_for_ues(base_sinr, num_beams, ue_target, seed=42+ue_target)
+        # Load SINR matrix for this specific UE count
+        ue_dir = os.path.join(used_dir, f"ue{ue_target}")
+        if not os.path.exists(ue_dir):
+            print(f"  ATLA: ue{ue_target} dizini bulunamadı")
+            continue
+        
+        sinr_matrix = load_lena_sinr_base(ue_dir)
+        if sinr_matrix is None:
+            print(f"  ATLA: ue{ue_target} için SINR verisi yüklenemedi")
+            continue
         
         print(f"\n{ue_target} UE ({sinr_matrix.shape[0]} beam x {sinr_matrix.shape[1]} UE):")
         results['ue_counts'].append(ue_target)
@@ -285,8 +298,9 @@ def run_benchmark():
             results['fitness'][alg_name].append(fitness)
             
             csv_rows.append({
-                'num_ues': ue_target,
                 'algorithm': alg_name,
+                'num_ues': ue_target,
+                'sum_rate': sum_rate,
                 'throughput': throughput_mbps,
                 'fairness': jain
             })
@@ -297,7 +311,7 @@ def run_benchmark():
     import csv
     csv_file = 'results_8beam_10to100.csv'
     with open(csv_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['num_ues', 'algorithm', 'throughput', 'fairness'])
+        writer = csv.DictWriter(f, fieldnames=['algorithm', 'num_ues', 'sum_rate', 'throughput', 'fairness'])
         writer.writeheader()
         writer.writerows(csv_rows)
     print(f"\n✅ Kaydedildi: {csv_file}")
