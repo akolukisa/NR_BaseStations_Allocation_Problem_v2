@@ -1,0 +1,13 @@
+[client]
+# Disable "Ask Google" and "Ask ChatGPT" links in error messages
+showErrorDetails = false
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#06b6d4"
+backgroundColor = "#0f172a"
+secondaryBackgroundColor = "#1e293b"
+textColor = "#f1f5f9"

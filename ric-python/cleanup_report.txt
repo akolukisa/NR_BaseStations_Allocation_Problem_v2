@@ -1,0 +1,182 @@
+=== FinalThesis Proje Temizlik Raporu ===
+Tarih: 2025-12-26
+
+## 1. HATA BULUNAN KLASÖRLER (Silinecek)
+
+### lena_4beam_20251226_024646/ (172K)
+Durum: ⚠️ AYNI VERİ - Tüm ue klasörleri 102 UE içeriyor
+Sebep: Streamlit st.rerun() sorunu, sadece son simülasyon çalıştı
+Aksiyon: SİL
+
+### lena_8beam_20251226_023418/ (176K)  
+Durum: ⚠️ AYNI VERİ - Tüm ue klasörleri 102 UE içeriyor
+Sebep: Streamlit st.rerun() sorunu, sadece son simülasyon çalıştı
+Aksiyon: SİL
+
+
+## 2. DOĞRU VERİ KLASÖRLERI (Koru)
+
+### lena_8beam_10to100/ (140K) ✅
+Durum: DOĞRU - Manuel shell script ile oluşturuldu
+İçerik: ue10=12UE, ue20=21UE ... ue100=102UE
+Kullanım: Ana benchmark için
+Aksiyon: KORU
+
+### lena_scalability_4beam/ (216K) ✅
+Durum: DOĞRU - 10-50 UE aralığı, 5 UE artışla
+İçerik: ue10=12UE ... ue50=51UE
+Kullanım: Scalability analizleri
+Aksiyon: KORU
+
+### lena_scalability_8beam/ (228K) ✅
+Durum: DOĞRU - 10-50 UE aralığı, 5 UE artışla
+İçerik: ue10=12UE ... ue50=51UE
+Kullanım: Scalability analizleri
+Aksiyon: KORU
+
+
+## 3. ESKİ TEK SİMÜLASYON KLASÖRLERI (Opsiyonel - Sil)
+
+### lena_sinr/ (36K)
+Durum: Eski tek simülasyon (48 UE)
+Sebep: Artık kullanılmıyor, 10to100 veri var
+Aksiyon: SİL
+
+### lena_sinr_4beam/ (36K)
+Durum: Eski 4 beam tek simülasyon (51 UE)
+Sebep: Artık kullanılmıyor
+Aksiyon: SİL
+
+### lena_sinr_8beam/ (36K)
+Durum: Eski 8 beam tek simülasyon (51 UE)
+Sebep: Artık kullanılmıyor, lena_8beam_10to100 var
+Aksiyon: SİL
+
+### lena_sinr_16beam/ (48K)
+Durum: Eski 16 beam tek simülasyon (51 UE)
+Sebep: 16 beam artık kullanılmıyor
+Aksiyon: SİL
+
+
+## 4. PLOT KLASÖRLERİ (Opsiyonel - Sil)
+
+### lena_real_plots/ (456K)
+### lena_ues_plots/ (848K)  
+### lena_realistic_plots/ (968K)
+Durum: Eski grafikler, yeniden üretilebilir
+Aksiyon: SİL (dashboard yeniden üretir)
+
+### plots_lena_4beam/ (?)
+### plots_lena_8beam/ (?)
+Durum: Eski statik grafikler
+Aksiyon: SİL
+
+
+## 5. GEREKSIZ CSV DOSYALARI (Opsiyonel - Sil)
+
+### Eski benchmark dosyaları (19 dosya, ~30KB):
+- results_corrected_benchmark.csv
+- results_exhaustive*.csv (4 dosya)
+- results_ga.csv, results_ga_beams16.csv, results_ga_ues10_50.csv
+- results_hga.csv, results_hga_beams16.csv, results_hga_ues10_50.csv
+- results_maxsinr*.csv (4 dosya)
+- results_pbig*.csv (4 dosya)
+- results_lena_ues10_50.csv
+- results_realistic_ues10_50.csv
+- results_v2_benchmark.csv
+
+### Edge/Fair/Multi (15 dosya, ~20KB):
+- results_*_edge.csv (4 dosya)
+- results_*_fair.csv (4 dosya)
+- results_*_multi_gnb.csv (4 dosya)
+- results_all_multi_gnb.csv
+
+### Test dosyaları (3 dosya):
+- results_ga_small.csv
+- results_hga_ues10_50_tail.csv
+- results_lena_real.csv
+
+AKSİYON: Eski benchmark ve test dosyalarını sil, sadece şunları koru:
+- results_4beam_10to100.csv ✅
+- results_8beam_10to100.csv ✅
+
+
+## 6. GEREKSIZ SCRIPT DOSYALARI
+
+### Eski benchmark scriptleri (silinebilir):
+- benchmark_comprehensive.py
+- benchmark_corrected.py
+- benchmark_fast.py
+- benchmark_interference.py
+- benchmark_realistic.py
+- benchmark_realistic_sweep.py
+- benchmark_scalability.py
+- benchmark_ues_sweep.py
+- benchmark_v2.py
+- benchmark_beam_comparison.py
+- benchmark_lena_sinr.py
+
+### Eski plot scriptleri (silinebilir):
+- plot_comprehensive.py
+- plot_lena_real.py
+- plot_multi_gnb.py
+- plot_realistic_sweep.py
+- plot_ues_sweep.py
+- plot_v2.py
+
+### Test scriptleri (koru):
+- test_all_lena.py ✅
+- test_all_multi_gnb.py ✅
+- test_multi_gnb_client.py ✅
+- test_ric_client.py ✅
+
+AKSİYON: Kullanılmayan eski benchmark ve plot scriptlerini sil
+
+
+## 7. KORU - AKTİF DOSYALAR
+
+### Python dosyaları:
+- dashboard_ric.py ✅ (Ana dashboard)
+- ric_server.py ✅ (RIC sunucusu)
+- ric_server_v2.py ✅ (RIC sunucusu v2)
+- benchmark_4beam_10to100.py ✅
+- benchmark_8beam_10to100.py ✅
+- benchmark_lena_4beam.py ✅
+- benchmark_lena_8beam.py ✅
+- benchmark_scalability_lena.py ✅
+- analyze_results.py ✅
+- test_*.py (4 dosya) ✅
+
+### CSV dosyaları:
+- results_4beam_10to100.csv ✅
+- results_8beam_10to100.csv ✅
+- table_6_3_performance.csv ✅
+- ric_benchmark_results.csv ✅
+
+### Shell scriptleri:
+- run_comprehensive_benchmark.sh ✅
+- run_lena_scalability.sh ✅
+- test_all_algorithms.sh ✅
+
+### Diğer:
+- sinr_logs/ (klasör) ✅
+- DASHBOARD_README.md ✅
+
+
+## ÖZET
+
+Toplam Kurtarılacak Alan:
+- Hatalı LENA klasörleri: ~350KB
+- Eski LENA klasörleri: ~160KB
+- Plot klasörleri: ~2.3MB
+- Gereksiz CSV: ~50KB
+- Gereksiz Python scriptleri: ~200KB
+
+TOPLAM: ~3MB
+
+Kalan dosya yapısı:
+- LENA verileri: lena_8beam_10to100/, lena_scalability_*
+- CSV: results_*beam_10to100.csv
+- Scripts: dashboard, benchmark, test dosyaları
+- Logs: sinr_logs/
+

@@ -60,10 +60,19 @@ class MaxSINROptimizer(BeamAssignmentOptimizer):
             best_beam = int(np.argmax(ue_sinrs))
             beam_assignment.append(best_beam)
         
-        logger.info(f"Max-SINR assignment: {beam_assignment}")
+        # Calculate sum-rate (objective_value) for the assignment
+        sum_rate = 0.0
+        for ue_idx, beam_idx in enumerate(beam_assignment):
+            sinr_db = sinr_matrix[beam_idx, ue_idx]
+            sinr_linear = 10 ** (sinr_db / 10.0)
+            rate = np.log2(1 + sinr_linear)  # Shannon capacity (bps/Hz)
+            sum_rate += rate
+        
+        logger.info(f"Max-SINR assignment: {beam_assignment}, sum-rate: {sum_rate:.2f}")
         return {
             "algorithm": self.algorithm_name,
             "beam_for_ue": beam_assignment,
+            "objective_value": sum_rate,
             "scenario_id": scenario_data.get('scenario_id', 0)
         }
 
@@ -117,37 +126,97 @@ class ExhaustiveSearchOptimizer(BeamAssignmentOptimizer):
 
 
 class GAOptimizer(BeamAssignmentOptimizer):
-    """Genetic Algorithm for beam-UE assignment"""
+    """Genetic Algorithm for beam-UE assignment (Thesis-compliant version)
     
-    def __init__(self, population_size=50, generations=100, mutation_rate=0.1):
+    Implements GA as described in thesis Section 4.2:
+    - Chromosome: List of beam assignments for each UE
+    - Selection: Roulette Wheel (cumulative fitness-proportional)
+    - Crossover: Single-point crossover
+    - Mutation: Random beam assignment + repair (if needed)
+    - Fitness: Weighted sum-rate + Jain fairness with penalty for constraint violations
+    """
+    
+    def __init__(self, population_size=50, generations=100, mutation_rate=0.1,
+                 constraint_penalty=0.5, max_ues_per_beam=None,
+                 alpha: float = 1.0):
         super().__init__("GA")
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
+        self.constraint_penalty = constraint_penalty
+        self.max_ues_per_beam = max_ues_per_beam  # None = no constraint
+        # Alpha: trade-off between sum-rate and Jain fairness (0-1)
+        self.alpha = float(alpha)
+        if self.alpha < 0.0:
+            self.alpha = 0.0
+        if self.alpha > 1.0:
+            self.alpha = 1.0
     
     def optimize(self, scenario_data: Dict) -> Dict:
         sinr_matrix = np.array(scenario_data['sinr_matrix_dB'])
         num_beams = scenario_data['num_beams']
         num_ues = scenario_data['num_ues']
         
-        # Fitness function: sum-rate objective
-        def fitness(chromosome: np.ndarray) -> float:
-            total_rate = 0.0
+        # Compute rates per UE
+        def compute_rates(chromosome: np.ndarray) -> np.ndarray:
+            rates = []
             for ue_idx, beam_idx in enumerate(chromosome):
                 sinr_db = sinr_matrix[int(beam_idx), ue_idx]
                 sinr_linear = 10 ** (sinr_db / 10.0)
                 rate = np.log2(1 + sinr_linear)
-                total_rate += rate
-            return total_rate
+                rates.append(rate)
+            return np.array(rates, dtype=float)
         
-        # Initialize population
+        def compute_sumrate_and_jain(chromosome: np.ndarray) -> Tuple[float, float]:
+            rates = compute_rates(chromosome)
+            sum_rate = float(np.sum(rates))
+            if np.all(rates == 0):
+                jain = 0.0
+            else:
+                jain = float((np.sum(rates) ** 2) / (len(rates) * np.sum(rates ** 2)))
+            return sum_rate, jain
+        
+        def is_feasible(chromosome: np.ndarray) -> bool:
+            """Check if solution satisfies beam capacity constraints (if enabled)."""
+            if self.max_ues_per_beam is None:
+                return True  # No constraints
+            beam_loads = np.bincount(chromosome.astype(int), minlength=num_beams)
+            return np.all(beam_loads <= self.max_ues_per_beam)
+        
+        def repair_assignment(chromosome: np.ndarray) -> np.ndarray:
+            """Repair infeasible solution by redistributing UEs from overloaded beams."""
+            if is_feasible(chromosome):
+                return chromosome
+            repaired = chromosome.copy()
+            beam_loads = np.bincount(repaired.astype(int), minlength=num_beams)
+            overloaded = np.where(beam_loads > self.max_ues_per_beam)[0]
+            for beam_idx in overloaded:
+                ue_indices = np.where(repaired == beam_idx)[0]
+                excess = int(beam_loads[beam_idx] - self.max_ues_per_beam)
+                for ue_idx in ue_indices[:excess]:
+                    # Find beam with lowest load
+                    alternative_beam = int(np.argmin(beam_loads))
+                    repaired[ue_idx] = alternative_beam
+                    beam_loads[beam_idx] -= 1
+                    beam_loads[alternative_beam] += 1
+            return repaired
+        
+        def fitness(chromosome: np.ndarray) -> float:
+            """Fitness: alpha*SumRate + (1-alpha)*Jain, with capacity penalty."""
+            sum_rate, jain = compute_sumrate_and_jain(chromosome)
+            core = self.alpha * sum_rate + (1.0 - self.alpha) * jain
+            if not is_feasible(chromosome):
+                return core * self.constraint_penalty
+            return core
+        
+        # Initialize population (thesis: InitializePopulation)
         population = np.random.randint(0, num_beams, (self.population_size, num_ues))
         
         best_chromosome = None
         best_fitness = -np.inf
         
         for gen in range(self.generations):
-            # Evaluate fitness
+            # Evaluate fitness (thesis: Evaluate(pop))
             fitness_values = np.array([fitness(ind) for ind in population])
             
             # Track best
@@ -156,14 +225,23 @@ class GAOptimizer(BeamAssignmentOptimizer):
                 best_fitness = fitness_values[gen_best_idx]
                 best_chromosome = population[gen_best_idx].copy()
             
-            # Selection (tournament)
+            # Selection: Roulette Wheel (thesis requirement)
+            min_fitness = np.min(fitness_values)
+            if min_fitness < 0:
+                shifted_fitness = fitness_values - min_fitness + 1e-10
+            else:
+                shifted_fitness = fitness_values + 1e-10
+            fitness_sum = np.sum(shifted_fitness)
+            probabilities = shifted_fitness / fitness_sum
+            cumulative_prob = np.cumsum(probabilities)
+            
             selected = []
             for _ in range(self.population_size):
-                idx1, idx2 = np.random.choice(self.population_size, 2, replace=False)
-                winner = idx1 if fitness_values[idx1] > fitness_values[idx2] else idx2
-                selected.append(population[winner].copy())
+                r = np.random.rand()
+                idx = np.searchsorted(cumulative_prob, r)
+                selected.append(population[idx].copy())
             
-            # Crossover
+            # Crossover: Single-point (thesis: Tek Nokta Crossover)
             offspring = []
             for i in range(0, self.population_size, 2):
                 parent1 = selected[i]
@@ -173,11 +251,13 @@ class GAOptimizer(BeamAssignmentOptimizer):
                 child2 = np.concatenate([parent2[:crossover_point], parent1[crossover_point:]])
                 offspring.extend([child1, child2])
             
-            # Mutation
+            # Mutation with repair
             for child in offspring:
                 if np.random.rand() < self.mutation_rate:
                     mutate_idx = np.random.randint(num_ues)
                     child[mutate_idx] = np.random.randint(num_beams)
+                    if self.max_ues_per_beam is not None:
+                        child = repair_assignment(child)
             
             population = np.array(offspring[:self.population_size])
         
@@ -185,59 +265,121 @@ class GAOptimizer(BeamAssignmentOptimizer):
         return {
             "algorithm": self.algorithm_name,
             "beam_for_ue": best_chromosome.tolist(),
-            "objective_value": best_fitness,
+            "objective_value": float(best_fitness),
             "scenario_id": scenario_data.get('scenario_id', 0)
         }
 
 
 class HGAOptimizer(BeamAssignmentOptimizer):
-    """Hybrid Genetic Algorithm with local search"""
+    """Hybrid Genetic Algorithm with local search (Thesis-compliant version)
     
-    def __init__(self, population_size=50, generations=100, mutation_rate=0.1, local_search_prob=0.3):
+    Implements HGA as described in thesis Section 4.3:
+    - Inherits GA operators
+    - Adds memetic local search: randomly select ls_rate × pop_size individuals
+    - Local search: randomly change one user's assignment + repair
+    - Budget: number of local search iterations per individual
+    """
+    
+    def __init__(self, population_size=50, generations=100, mutation_rate=0.1,
+                 ls_rate=0.3, budget=10, constraint_penalty=0.5, max_ues_per_beam=None,
+                 alpha: float = 1.0):
         super().__init__("HGA")
         self.population_size = population_size
         self.generations = generations
         self.mutation_rate = mutation_rate
-        self.local_search_prob = local_search_prob
+        self.ls_rate = ls_rate  # Fraction of population for local search
+        self.budget = budget  # Local search iterations per individual
+        self.constraint_penalty = constraint_penalty
+        self.max_ues_per_beam = max_ues_per_beam
+        self.alpha = float(alpha)
+        if self.alpha < 0.0:
+            self.alpha = 0.0
+        if self.alpha > 1.0:
+            self.alpha = 1.0
     
     def optimize(self, scenario_data: Dict) -> Dict:
         sinr_matrix = np.array(scenario_data['sinr_matrix_dB'])
         num_beams = scenario_data['num_beams']
         num_ues = scenario_data['num_ues']
         
-        def fitness(chromosome: np.ndarray) -> float:
-            total_rate = 0.0
+        def compute_rates(chromosome: np.ndarray) -> np.ndarray:
+            rates = []
             for ue_idx, beam_idx in enumerate(chromosome):
                 sinr_db = sinr_matrix[int(beam_idx), ue_idx]
                 sinr_linear = 10 ** (sinr_db / 10.0)
                 rate = np.log2(1 + sinr_linear)
-                total_rate += rate
-            return total_rate
+                rates.append(rate)
+            return np.array(rates, dtype=float)
         
-        def local_search(chromosome: np.ndarray) -> np.ndarray:
-            """Try flipping each gene to improve fitness"""
-            current_fitness = fitness(chromosome)
-            improved = chromosome.copy()
-            for ue_idx in range(num_ues):
-                original_beam = improved[ue_idx]
-                for beam_idx in range(num_beams):
-                    if beam_idx == original_beam:
-                        continue
-                    improved[ue_idx] = beam_idx
-                    new_fitness = fitness(improved)
-                    if new_fitness > current_fitness:
-                        current_fitness = new_fitness
-                    else:
-                        improved[ue_idx] = original_beam
-            return improved
+        def compute_sumrate_and_jain(chromosome: np.ndarray) -> Tuple[float, float]:
+            rates = compute_rates(chromosome)
+            sum_rate = float(np.sum(rates))
+            if np.all(rates == 0):
+                jain = 0.0
+            else:
+                jain = float((np.sum(rates) ** 2) / (len(rates) * np.sum(rates ** 2)))
+            return sum_rate, jain
         
-        # Initialize population (similar to GA)
+        def is_feasible(chromosome: np.ndarray) -> bool:
+            if self.max_ues_per_beam is None:
+                return True
+            beam_loads = np.bincount(chromosome.astype(int), minlength=num_beams)
+            return np.all(beam_loads <= self.max_ues_per_beam)
+        
+        def repair_assignment(chromosome: np.ndarray) -> np.ndarray:
+            if is_feasible(chromosome):
+                return chromosome
+            repaired = chromosome.copy()
+            beam_loads = np.bincount(repaired.astype(int), minlength=num_beams)
+            overloaded = np.where(beam_loads > self.max_ues_per_beam)[0]
+            for beam_idx in overloaded:
+                ue_indices = np.where(repaired == beam_idx)[0]
+                excess = int(beam_loads[beam_idx] - self.max_ues_per_beam)
+                for ue_idx in ue_indices[:excess]:
+                    alternative_beam = int(np.argmin(beam_loads))
+                    repaired[ue_idx] = alternative_beam
+                    beam_loads[beam_idx] -= 1
+                    beam_loads[alternative_beam] += 1
+            return repaired
+        
+        def fitness(chromosome: np.ndarray) -> float:
+            sum_rate, jain = compute_sumrate_and_jain(chromosome)
+            core = self.alpha * sum_rate + (1.0 - self.alpha) * jain
+            if not is_feasible(chromosome):
+                return core * self.constraint_penalty
+            return core
+        
+        def local_search(individual: np.ndarray) -> np.ndarray:
+            """Stochastic local search (thesis: LocalSearch with budget)
+            
+            Randomly change one user's assignment and apply repair.
+            Repeat 'budget' times, accept if improvement.
+            """
+            current = individual.copy()
+            current_fitness = fitness(current)
+            
+            for _ in range(self.budget):
+                # Randomly select a user
+                ue_idx = np.random.randint(num_ues)
+                new_beam = np.random.randint(num_beams)
+                neighbor = current.copy()
+                neighbor[ue_idx] = new_beam
+                if self.max_ues_per_beam is not None:
+                    neighbor = repair_assignment(neighbor)
+                neighbor_fitness = fitness(neighbor)
+                if neighbor_fitness > current_fitness:
+                    current = neighbor
+                    current_fitness = neighbor_fitness
+            return current
+        
+        # Initialize population
         population = np.random.randint(0, num_beams, (self.population_size, num_ues))
         
         best_chromosome = None
         best_fitness = -np.inf
         
         for gen in range(self.generations):
+            # Apply GA operators
             fitness_values = np.array([fitness(ind) for ind in population])
             
             gen_best_idx = np.argmax(fitness_values)
@@ -245,12 +387,17 @@ class HGAOptimizer(BeamAssignmentOptimizer):
                 best_fitness = fitness_values[gen_best_idx]
                 best_chromosome = population[gen_best_idx].copy()
             
-            # Selection
+            # Roulette Wheel Selection
+            min_fitness = np.min(fitness_values)
+            shifted_fitness = fitness_values - min_fitness + 1e-10 if min_fitness < 0 else fitness_values + 1e-10
+            probabilities = shifted_fitness / np.sum(shifted_fitness)
+            cumulative_prob = np.cumsum(probabilities)
+            
             selected = []
             for _ in range(self.population_size):
-                idx1, idx2 = np.random.choice(self.population_size, 2, replace=False)
-                winner = idx1 if fitness_values[idx1] > fitness_values[idx2] else idx2
-                selected.append(population[winner].copy())
+                r = np.random.rand()
+                idx = np.searchsorted(cumulative_prob, r)
+                selected.append(population[idx].copy())
             
             # Crossover
             offspring = []
@@ -267,69 +414,173 @@ class HGAOptimizer(BeamAssignmentOptimizer):
                 if np.random.rand() < self.mutation_rate:
                     mutate_idx = np.random.randint(num_ues)
                     child[mutate_idx] = np.random.randint(num_beams)
-            
-            # Local search (hybrid part)
-            for i, child in enumerate(offspring):
-                if np.random.rand() < self.local_search_prob:
-                    offspring[i] = local_search(child)
+                    if self.max_ues_per_beam is not None:
+                        child = repair_assignment(child)
             
             population = np.array(offspring[:self.population_size])
+            
+            # Memetic step: Local search
+            k = max(1, int(self.ls_rate * self.population_size))
+            subset_indices = np.random.choice(self.population_size, k, replace=False)
+            for idx in subset_indices:
+                population[idx] = local_search(population[idx])
         
         logger.info(f"HGA best assignment: {best_chromosome.tolist()}, fitness: {best_fitness:.2f}")
         return {
             "algorithm": self.algorithm_name,
             "beam_for_ue": best_chromosome.tolist(),
-            "objective_value": best_fitness,
+            "objective_value": float(best_fitness),
             "scenario_id": scenario_data.get('scenario_id', 0)
         }
 
 
 class PBIGOptimizer(BeamAssignmentOptimizer):
-    """Priority-Based Iterative Greedy algorithm"""
+    """Population-Based Iterated Greedy algorithm (Thesis-compliant version)
     
-    def __init__(self):
+    Implements PBIG as described in thesis Section 4.4:
+    - Population of solutions (not single solution)
+    - Destruction: Remove d_ratio of users from assignment
+    - Reconstruction: Greedy reassignment of removed users
+    - Iterate max_iter times
+    """
+    
+    def __init__(self, population_size=20, max_iter=100, destruction_ratio=0.3,
+                 constraint_penalty=0.5, max_ues_per_beam=None,
+                 alpha: float = 1.0):
         super().__init__("PBIG")
+        self.population_size = population_size
+        self.max_iter = max_iter
+        self.destruction_ratio = destruction_ratio  # d_ratio in thesis
+        self.constraint_penalty = constraint_penalty
+        self.max_ues_per_beam = max_ues_per_beam
+        self.alpha = float(alpha)
+        if self.alpha < 0.0:
+            self.alpha = 0.0
+        if self.alpha > 1.0:
+            self.alpha = 1.0
     
     def optimize(self, scenario_data: Dict) -> Dict:
         sinr_matrix = np.array(scenario_data['sinr_matrix_dB'])
         num_beams = scenario_data['num_beams']
         num_ues = scenario_data['num_ues']
         
-        # Priority-based: start with UEs that have the least beam options (highest variance)
-        ue_sinr_variance = np.var(sinr_matrix, axis=0)  # Variance across beams for each UE
-        ue_priorities = np.argsort(ue_sinr_variance)  # Ascending: least flexible first
+        def compute_rates(chromosome: np.ndarray) -> np.ndarray:
+            rates = []
+            for ue_idx, beam_idx in enumerate(chromosome):
+                if beam_idx < 0:
+                    rates.append(0.0)
+                    continue
+                sinr_db = sinr_matrix[int(beam_idx), ue_idx]
+                sinr_linear = 10 ** (sinr_db / 10.0)
+                rate = np.log2(1 + sinr_linear)
+                rates.append(rate)
+            return np.array(rates, dtype=float)
         
-        beam_assignment = [-1] * num_ues
-        beam_load = np.zeros(num_beams)  # Track how many UEs per beam
+        def compute_sumrate_and_jain(chromosome: np.ndarray) -> Tuple[float, float]:
+            rates = compute_rates(chromosome)
+            sum_rate = float(np.sum(rates))
+            if np.all(rates == 0):
+                jain = 0.0
+            else:
+                jain = float((np.sum(rates) ** 2) / (len(rates) * np.sum(rates ** 2)))
+            return sum_rate, jain
         
-        # Greedy assignment in priority order
-        for ue_idx in ue_priorities:
-            # Find the beam that maximizes SINR for this UE
-            # (with optional penalty for overloaded beams)
-            ue_sinrs = sinr_matrix[:, ue_idx]
-            # Convert dB to linear for calculation
-            ue_sinrs_linear = 10 ** (ue_sinrs / 10.0)
+        def is_feasible(chromosome: np.ndarray) -> bool:
+            if self.max_ues_per_beam is None:
+                return True
+            assigned = chromosome[chromosome >= 0]
+            if len(assigned) == 0:
+                return True
+            beam_loads = np.bincount(assigned.astype(int), minlength=num_beams)
+            return np.all(beam_loads <= self.max_ues_per_beam)
+        
+        def repair_assignment(chromosome: np.ndarray) -> np.ndarray:
+            if is_feasible(chromosome):
+                return chromosome
+            repaired = chromosome.copy()
+            assigned = repaired[repaired >= 0]
+            beam_loads = np.bincount(assigned.astype(int), minlength=num_beams)
+            overloaded = np.where(beam_loads > self.max_ues_per_beam)[0]
+            for beam_idx in overloaded:
+                ue_indices = np.where(repaired == beam_idx)[0]
+                excess = int(beam_loads[beam_idx] - self.max_ues_per_beam)
+                for ue_idx in ue_indices[:excess]:
+                    alternative_beam = int(np.argmin(beam_loads))
+                    repaired[ue_idx] = alternative_beam
+                    beam_loads[beam_idx] -= 1
+                    beam_loads[alternative_beam] += 1
+            return repaired
+        
+        def fitness(chromosome: np.ndarray) -> float:
+            sum_rate, jain = compute_sumrate_and_jain(chromosome)
+            core = self.alpha * sum_rate + (1.0 - self.alpha) * jain
+            if not is_feasible(chromosome):
+                return core * self.constraint_penalty
+            return core
+        
+        def greedy_assign(ue_idx: int, partial_solution: np.ndarray) -> int:
+            """Greedy assignment for one user (thesis: GreedyAssign)
             
-            # Simple greedy: pick max SINR beam
-            # (Can add beam load balancing penalty here)
-            best_beam = int(np.argmax(ue_sinrs_linear))
+            Try all beams, select the one that maximizes objective.
+            """
+            best_beam = -1
+            best_improvement = -np.inf
             
-            beam_assignment[ue_idx] = best_beam
-            beam_load[best_beam] += 1
+            for beam_idx in range(num_beams):
+                candidate = partial_solution.copy()
+                candidate[ue_idx] = beam_idx
+                if self.max_ues_per_beam is not None:
+                    candidate = repair_assignment(candidate)
+                improvement = fitness(candidate)
+                if improvement > best_improvement:
+                    best_improvement = improvement
+                    best_beam = beam_idx
+            return best_beam
         
-        # Calculate objective
-        total_rate = 0.0
-        for ue_idx, beam_idx in enumerate(beam_assignment):
-            sinr_db = sinr_matrix[beam_idx, ue_idx]
-            sinr_linear = 10 ** (sinr_db / 10.0)
-            rate = np.log2(1 + sinr_linear)
-            total_rate += rate
+        # Initialize population (thesis: InitializePopulation)
+        population = []
+        for _ in range(self.population_size):
+            individual = np.random.randint(0, num_beams, num_ues)
+            if self.max_ues_per_beam is not None:
+                individual = repair_assignment(individual)
+            population.append(individual)
         
-        logger.info(f"PBIG assignment: {beam_assignment}, objective: {total_rate:.2f}")
+        best_solution = None
+        best_fitness = -np.inf
+        
+        for iteration in range(self.max_iter):
+            # Select random solution from population (thesis: SelectRandom)
+            idx = np.random.randint(self.population_size)
+            S = population[idx].copy()
+            
+            # Destruction phase (thesis: Yıkım Fazı)
+            num_to_destroy = max(1, int(self.destruction_ratio * num_ues))
+            destroyed_users = np.random.choice(num_ues, num_to_destroy, replace=False)
+            D = destroyed_users
+            for u in D:
+                S[u] = -1
+            
+            # Reconstruction phase (thesis: Yeniden İnşa Fazı)
+            for u in D:
+                best_beam = greedy_assign(u, S)
+                S[u] = best_beam
+            
+            # Update population if improved
+            if fitness(S) > fitness(population[idx]):
+                population[idx] = S
+            
+            # Track global best
+            for individual in population:
+                ind_fitness = fitness(individual)
+                if ind_fitness > best_fitness:
+                    best_fitness = ind_fitness
+                    best_solution = individual.copy()
+        
+        logger.info(f"PBIG assignment: {best_solution.tolist()}, objective: {best_fitness:.2f}")
         return {
             "algorithm": self.algorithm_name,
-            "beam_for_ue": beam_assignment,
-            "objective_value": total_rate,
+            "beam_for_ue": best_solution.tolist(),
+            "objective_value": float(best_fitness),
             "scenario_id": scenario_data.get('scenario_id', 0)
         }
 
@@ -337,10 +588,14 @@ class PBIGOptimizer(BeamAssignmentOptimizer):
 class RICServer:
     """Near-RT RIC TCP Server for ns-3 integration"""
     
-    def __init__(self, host='127.0.0.1', port=5555, algorithm='GA'):
+    def __init__(self, host='127.0.0.1', port=5555, algorithm='GA',
+                 alpha: float = 1.0,
+                 max_ues_per_beam: int = None):
         self.host = host
         self.port = port
         self.algorithm = algorithm
+        self.alpha = float(alpha)
+        self.max_ues_per_beam = max_ues_per_beam
         
         # Initialize optimizer based on algorithm choice
         if algorithm == 'Max-SINR':
@@ -348,15 +603,18 @@ class RICServer:
         elif algorithm == 'Exhaustive':
             self.optimizer = ExhaustiveSearchOptimizer()
         elif algorithm == 'GA':
-            self.optimizer = GAOptimizer()
+            self.optimizer = GAOptimizer(max_ues_per_beam=self.max_ues_per_beam,
+                                         alpha=self.alpha)
         elif algorithm == 'HGA':
-            self.optimizer = HGAOptimizer()
+            self.optimizer = HGAOptimizer(max_ues_per_beam=self.max_ues_per_beam,
+                                          alpha=self.alpha)
         elif algorithm == 'PBIG':
-            self.optimizer = PBIGOptimizer()
+            self.optimizer = PBIGOptimizer(max_ues_per_beam=self.max_ues_per_beam,
+                                           alpha=self.alpha)
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
         
-        logger.info(f"RIC Server initialized with {algorithm} algorithm")
+        logger.info(f"RIC Server initialized with {algorithm} algorithm (alpha={self.alpha}, max_ues_per_beam={self.max_ues_per_beam})")
     
     async def handle_client(self, reader, writer):
         """Handle incoming client connection from ns-3"""
@@ -376,10 +634,16 @@ class RICServer:
             # Parse JSON request
             request = json.loads(message)
             logger.info(f"Processing scenario {request.get('scenario_id', 'unknown')} "
-                       f"with {request.get('num_beams')} beams and {request.get('num_ues')} UEs")
+                       f"with {request.get('num_beams', 'N/A')} beams and {request.get('num_ues')} UEs")
             
-            # Optimize beam assignment
-            response = self.optimizer.optimize(request)
+            # Prepare internal scenario (single- or multi-gNB)
+            internal_request, resource_map = self._prepare_scenario(request)
+            
+            # Optimize beam assignment (over resources)
+            internal_response = self.optimizer.optimize(internal_request)
+            
+            # Post-process to map resources back to (gNB, beam)
+            response = self._postprocess_response(request, internal_response, resource_map)
             
             # Send response back to ns-3
             response_json = json.dumps(response)
@@ -395,6 +659,63 @@ class RICServer:
         finally:
             writer.close()
             await writer.wait_closed()
+    
+    def _prepare_scenario(self, request: Dict) -> Tuple[Dict, List[Dict]]:
+        """Convert incoming request to internal single-resource-index scenario.
+        
+        Supports both legacy single-gNB mode and multi-gNB mode.
+        Returns (internal_request, resource_map) where resource_map is a list of
+        dicts with keys {'gnb_id', 'beam_id'} for each resource index.
+        """
+        # Multi-gNB mode: expect sinr_matrix_dB as [gNB][beam][ue]
+        if 'num_gnbs' in request:
+            sinr = np.array(request['sinr_matrix_dB'])
+            if sinr.ndim != 3:
+                raise ValueError("For multi-gNB mode, sinr_matrix_dB must be 3D [gNB][beam][ue]")
+            num_gnbs, num_beams_per_gnb, num_ues = sinr.shape
+            resource_map: List[Dict] = []
+            flat_rows = []
+            for gnb_id in range(num_gnbs):
+                for beam_id in range(num_beams_per_gnb):
+                    resource_map.append({'gnb_id': int(gnb_id), 'beam_id': int(beam_id)})
+                    flat_rows.append(sinr[gnb_id, beam_id, :])
+            internal_request = {
+                'scenario_id': request.get('scenario_id', 0),
+                'num_beams': len(resource_map),  # now "beams" = resources
+                'num_ues': int(num_ues),
+                'sinr_matrix_dB': np.array(flat_rows).tolist(),
+            }
+            return internal_request, resource_map
+        
+        # Legacy single-gNB mode: pass through, but build a simple resource map
+        num_beams = int(request.get('num_beams', 0))
+        gnb_id = int(request.get('gNB_id', 0))
+        resource_map = [{'gnb_id': gnb_id, 'beam_id': b} for b in range(num_beams)]
+        return request, resource_map
+    
+    def _postprocess_response(self, original_request: Dict,
+                              internal_response: Dict,
+                              resource_map: List[Dict]) -> Dict:
+        """Map optimizer response (over resources) back to (gNB, beam) per UE."""
+        # Multi-gNB request: build gnb_for_ue + beam_for_ue using resource_map
+        if 'num_gnbs' in original_request:
+            resource_indices = internal_response.get('beam_for_ue', [])
+            gnb_for_ue: List[int] = []
+            beam_for_ue: List[int] = []
+            for res_idx in resource_indices:
+                mapping = resource_map[int(res_idx)]
+                gnb_for_ue.append(int(mapping['gnb_id']))
+                beam_for_ue.append(int(mapping['beam_id']))
+            return {
+                'algorithm': internal_response.get('algorithm', self.algorithm),
+                'gnb_for_ue': gnb_for_ue,
+                'beam_for_ue': beam_for_ue,
+                'objective_value': internal_response.get('objective_value'),
+                'scenario_id': original_request.get('scenario_id', 0),
+            }
+        
+        # Single-gNB case: return optimizer response as-is
+        return internal_response
     
     async def start(self):
         """Start the RIC server"""
@@ -420,6 +741,10 @@ def main():
     parser.add_argument('--port', type=int, default=5555, help='Server port (default: 5555)')
     parser.add_argument('--algorithm', choices=['Max-SINR', 'Exhaustive', 'GA', 'HGA', 'PBIG'],
                        default='GA', help='Optimization algorithm to use')
+    parser.add_argument('--alpha', type=float, default=1.0,
+                       help='Trade-off between sum-rate and Jain fairness (0-1)')
+    parser.add_argument('--max-ues-per-beam', type=int, default=None,
+                       help='Maximum number of UEs per beam (capacity constraint, optional)')
     parser.add_argument('--verbose', action='store_true', help='Enable verbose logging')
     
     args = parser.parse_args()
@@ -428,7 +753,11 @@ def main():
         logging.getLogger().setLevel(logging.DEBUG)
     
     # Run server
-    server = RICServer(host=args.host, port=args.port, algorithm=args.algorithm)
+    server = RICServer(host=args.host,
+                       port=args.port,
+                       algorithm=args.algorithm,
+                       alpha=args.alpha,
+                       max_ues_per_beam=args.max_ues_per_beam)
     
     try:
         asyncio.run(server.start())
